@@ -1,0 +1,36 @@
+# --- Terraform ---
+# Provider binaries and module caches. Never commit these; the old
+# atlas-automation/ directory carried an 84MB provider binary.
+.terraform/
+.terraform.tfstate.lock.info
+crash.log
+crash.*.log
+
+# State. Contains resource IDs and can contain secrets in cleartext
+# (e.g. google_service_account_key writes the private key into state).
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+
+# Variable files hold org IDs, project IDs and keys. Commit only examples.
+*.tfvars
+*.tfvars.json
+!*.example.tfvars
+
+# .terraform.lock.hcl is intentionally NOT ignored -- it pins provider
+# versions and is the point of this project being reproducible.
+
+# --- Credentials ---
+.env
+.env.*
+!.env.example
+*-key.json
+*-credentials.json
+service-account*.json
+application_default_credentials.json
+
+# --- Generated / local ---
+output/
+node_modules/
+.DS_Store

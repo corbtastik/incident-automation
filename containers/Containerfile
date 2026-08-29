@@ -1,0 +1,20 @@
+# incident-automation setup container.
+#
+# Base is Google's current image. The legacy docker.io/google/cloud-sdk
+# mirror is amd64-only, which forces emulation on Apple Silicon; this one
+# publishes both linux/arm64 and linux/amd64. Phase 6 pins the tag.
+ARG CLOUD_SDK_IMAGE=gcr.io/google.com/cloudsdktool/google-cloud-cli
+ARG CLOUD_SDK_TAG=slim
+FROM ${CLOUD_SDK_IMAGE}:${CLOUD_SDK_TAG}
+
+ENV CLOUDSDK_CORE_DISABLE_PROMPTS=1
+
+WORKDIR /opt/incident-automation
+
+COPY containers/entrypoint.sh /opt/incident-automation/entrypoint.sh
+COPY scripts/ /opt/incident-automation/scripts/
+
+RUN chmod +x /opt/incident-automation/entrypoint.sh /opt/incident-automation/scripts/*.sh
+
+ENTRYPOINT ["/opt/incident-automation/entrypoint.sh"]
+CMD ["help"]
