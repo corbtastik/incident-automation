@@ -8,7 +8,9 @@ own environment rather than sharing a hosted one.
 
 ## Status
 
-**GCP provisioning is complete and tested.** Atlas has not been started.
+**GCP provisioning is complete and tested.** Atlas is underway — the image and
+credentials are in place and `atlas status` reports project state; nothing is
+provisioned on that side yet.
 
 | Command | What it does |
 |---|---|
@@ -19,7 +21,22 @@ own environment rather than sharing a hosted one.
 | `gcp validate` | Activates the runtime key and reads the bucket as that identity. Changes nothing |
 | `gcp destroy` | Deletes the bucket and the runtime service account. Takes `--yes` |
 | `gcp teardown` | Deletes the bootstrap service account and its roles. Run after `destroy`. Takes `--yes` |
+| `atlas status` | Reports Atlas project state — clusters, search nodes, stream instances. Changes nothing |
 | `help` | Usage |
+
+## Configuration
+
+Values can come from the command line or a file:
+
+```bash
+podman run --rm --env-file .env ...                    # read by podman
+podman run --rm -v "$PWD/.env:/config/.env:ro" ...     # read by the container
+```
+
+Precedence is explicit `-e`, then the file, then values recorded by earlier
+runs in `output/`, then defaults. `--env-file` cannot carry multi-line values,
+so `GCP_CREDENTIALS_JSON` belongs on the command line — it is read from
+`output/` anyway. Copy `.env.example` to `.env`; it is gitignored.
 
 ## Prerequisites
 
@@ -110,6 +127,10 @@ Both apps already read `MEDIA_GCS_BUCKET` from the environment.
 | `RUNTIME_SA_NAME_BASE` | no | `incident-app-storage` |
 | `SKIP_API_ENABLE` | no | `false` |
 | `HOST_OUTPUT_DIR` | no | `./output` — host path, so emitted files carry paths that resolve outside the container |
+| `ATLAS_PUBLIC_KEY` | `atlas` verbs | none. Org API key, created in the Atlas UI |
+| `ATLAS_PRIVATE_KEY` | `atlas` verbs | none |
+| `ATLAS_PROJECT_ID` | `atlas` verbs | none. Setup does not create the project |
+| `ATLAS_ORG_ID` | no | none |
 
 See `.env.example`.
 
@@ -168,7 +189,8 @@ output/       emitted keys and records. gitignored
 ## Not done yet
 
 - Publishing the image, so users do not have to build it
-- Everything Atlas
+- Atlas provisioning — cluster, dedicated search nodes, stream processing
+  workspace, then collections, indexes and stream processors
 
 ## Decisions
 
@@ -188,6 +210,12 @@ output/       emitted keys and records. gitignored
   the runtime account; the runtime account can only read one bucket. The
   bootstrap account cannot create itself, because granting project-level roles
   needs permissions it deliberately does not have.
+- **Atlas CLI, not Terraform**, for the same reasons. `atlas api` is a
+  passthrough over the whole Administration API, so anything without a
+  first-class command — the stream processors — is still reachable from the
+  same binary with the same credentials.
+- **The data plane needs mongosh.** No Atlas API creates a collection, and
+  collections must exist before search indexes can be built on them.
 - **Base image is `gcr.io/google.com/cloudsdktool/google-cloud-cli`**, not the
   legacy `docker.io/google/cloud-sdk` mirror, which is amd64-only and forces
   emulation on Apple Silicon.

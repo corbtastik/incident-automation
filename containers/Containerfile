@@ -7,6 +7,36 @@ ARG CLOUD_SDK_IMAGE=gcr.io/google.com/cloudsdktool/google-cloud-cli
 ARG CLOUD_SDK_TAG=slim
 FROM ${CLOUD_SDK_IMAGE}:${CLOUD_SDK_TAG}
 
+# Atlas CLI covers the Atlas control plane, including `atlas api`, a
+# passthrough over the whole Administration API for anything without a
+# first-class command -- the stream processors, notably.
+#
+# mongosh covers the data plane. No Atlas API creates a collection, and
+# collections must exist before search indexes can be built on them.
+ARG ATLAS_CLI_VERSION=1.48.0
+ARG MONGOSH_VERSION=2.5.8
+
+# Both publish per-architecture artefacts under different naming schemes,
+# so the arch is resolved once and mapped twice.
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      aarch64) atlas_arch=arm64; mongosh_arch=arm64 ;; \
+      x86_64)  atlas_arch=x86_64; mongosh_arch=x64  ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://fastdl.mongodb.org/mongocli/mongodb-atlas-cli_${ATLAS_CLI_VERSION}_linux_${atlas_arch}.tar.gz" \
+      | tar -xz -C /tmp; \
+    mv /tmp/mongodb-atlas-cli_*/bin/atlas /usr/local/bin/atlas; \
+    curl -fsSL "https://downloads.mongodb.com/compass/mongosh-${MONGOSH_VERSION}-linux-${mongosh_arch}.tgz" \
+      | tar -xz -C /tmp; \
+    mv /tmp/mongosh-*/bin/mongosh /usr/local/bin/mongosh; \
+    mv /tmp/mongosh-*/lib/* /usr/lib/ 2>/dev/null || true; \
+    rm -rf /tmp/mongodb-atlas-cli_* /tmp/mongosh-*; \
+    atlas config set silence_storage_warning true; \
+    atlas --version; \
+    mongosh --version
+
 ENV CLOUDSDK_CORE_DISABLE_PROMPTS=1
 
 WORKDIR /opt/incident-automation

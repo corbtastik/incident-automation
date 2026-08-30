@@ -165,3 +165,71 @@ ensure_apis() {
     fi
   done
 }
+
+# --- Atlas -----------------------------------------------------------------
+
+ATLAS_ENV_FILE="${OUTPUT_DIR}/atlas.env"
+
+# The Atlas CLI reads MONGODB_ATLAS_* from the environment, so no profile or
+# config file is needed. Inputs use our own ATLAS_* names and are translated
+# here.
+#
+# There is no bootstrap equivalent on this side: an Atlas org API key can only
+# be created in the UI, so it is always supplied by the operator.
+authenticate_atlas() {
+  local pub="${ATLAS_PUBLIC_KEY:-}" priv="${ATLAS_PRIVATE_KEY:-}"
+
+  if [[ -z "$pub" || -z "$priv" ]]; then
+    pub="${pub:-$(read_env_value "$ATLAS_ENV_FILE" ATLAS_PUBLIC_KEY 2>/dev/null || true)}"
+    priv="${priv:-$(read_env_value "$ATLAS_ENV_FILE" ATLAS_PRIVATE_KEY 2>/dev/null || true)}"
+  fi
+
+  [[ -n "$pub" && -n "$priv" ]] \
+    || die "ATLAS_PUBLIC_KEY and ATLAS_PRIVATE_KEY are required -- create an org API key in the Atlas UI"
+
+  export MONGODB_ATLAS_PUBLIC_API_KEY="$pub"
+  export MONGODB_ATLAS_PRIVATE_API_KEY="$priv"
+
+  ATLAS_ORG_ID="${ATLAS_ORG_ID:-$(read_env_value "$ATLAS_ENV_FILE" ATLAS_ORG_ID 2>/dev/null || true)}"
+  ATLAS_PROJECT_ID="${ATLAS_PROJECT_ID:-$(read_env_value "$ATLAS_ENV_FILE" ATLAS_PROJECT_ID 2>/dev/null || true)}"
+
+  [[ -n "$ATLAS_PROJECT_ID" ]] \
+    || die "ATLAS_PROJECT_ID is required -- setup does not create the project"
+
+  export MONGODB_ATLAS_ORG_ID="$ATLAS_ORG_ID"
+  export MONGODB_ATLAS_PROJECT_ID="$ATLAS_PROJECT_ID"
+}
+
+# Atlas rejects some provider/region combinations for capacity reasons, and
+# that is a real failure the operator must act on -- not something to sit and
+# retry through. Kept separate from retry_propagation for that reason.
+atlas_is_capacity_error() {
+  case "$1" in
+    *CANNOT_CREATE*|*"no capacity"*|*NO_CAPACITY*|*INSUFFICIENT*|*"not available in"*|*UNSUPPORTED*)
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Confirm the active credential can actually use the named project.
+#
+# gcloud does not fail on a project the credential has no claim to: it falls
+# back to the credential's own project and creates resources there. A typo in
+# GCP_PROJECT_ID therefore provisions silently into the wrong project rather
+# than erroring, so this is checked before anything is created.
+require_project_access() {
+  local project="$1" active err
+
+  active="$(gcloud config get-value core/account 2>/dev/null || true)"
+
+  # storage.buckets.list is granted by roles/storage.admin, which the
+  # bootstrap account holds. resourcemanager.projects.get is not, so
+  # `projects describe` would fail on a correctly scoped account.
+  if err="$(gcloud storage buckets list --project="$project" --limit=1 \
+      --format='value(name)' 2>&1 >/dev/null)"; then
+    return 0
+  fi
+
+  echo "$err" >&2
+  die "cannot use project '${project}' as ${active:-the active account} -- check GCP_PROJECT_ID"
+}

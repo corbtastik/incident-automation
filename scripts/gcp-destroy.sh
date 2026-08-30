@@ -17,6 +17,7 @@ assume_yes=0
 [[ "${1:-}" == "--yes" || "${1:-}" == "-y" ]] && assume_yes=1
 
 echo "project: ${PROJECT}"
+require_project_access "$PROJECT"
 echo
 
 # Same resolution order as apply, minus generation -- destroy never invents a

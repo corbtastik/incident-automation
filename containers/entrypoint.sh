@@ -12,6 +12,7 @@ set -euo pipefail
 
 SCRIPTS_DIR="${SCRIPTS_DIR:-/opt/incident-automation/scripts}"
 MOUNTED_CONFIG="${MOUNTED_CONFIG:-/gcloud-host}"
+CONFIG_ENV_FILE="${CONFIG_ENV_FILE:-/config/.env}"
 
 # shellcheck source=/dev/null
 source "${SCRIPTS_DIR}/common.sh"
@@ -28,6 +29,42 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Load a mounted .env, if there is one.
+#
+# Podman's own --env-file does the same job and needs no code, but it cannot
+# carry multi-line values and takes quotes literally. This path is the more
+# forgiving one, and means the operator does not have to remember a flag.
+#
+# Values already in the environment win: an explicit -e is a deliberate
+# one-off override and must not be clobbered by the file.
+load_config_env() {
+  [[ -f "$CONFIG_ENV_FILE" ]] || return 0
+
+  local line key value loaded=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+    line="${line#export }"
+    [[ "$line" == *=* ]] || continue
+
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key//[[:space:]]/}"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+
+    # Strip one layer of matching quotes, the way a shell would.
+    if [[ "$value" == \"*\" || "$value" == \'*\' ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+
+    [[ -n "${!key:-}" ]] && continue
+    export "${key}=${value}"
+    loaded=$((loaded + 1))
+  done < "$CONFIG_ENV_FILE"
+
+  echo "config: ${CONFIG_ENV_FILE} (${loaded} value(s))"
+}
+
 usage() {
   cat <<'EOF'
 incident-automation
@@ -43,6 +80,9 @@ Nouns and verbs:
   gcp validate    Prove the runtime credential works. Changes nothing.
   gcp destroy     Delete the media bucket and runtime account. Takes --yes.
   gcp teardown    Delete the bootstrap account. Run after destroy. Takes --yes.
+
+  atlas status    Report Atlas project state. Changes nothing.
+
   help            Show this message.
 
 Environment:
@@ -53,10 +93,21 @@ Environment:
   GCS_BUCKET_BASE_NAME   Required by `apply`. A random slug is appended, so
                          the bucket is <base>-<slug>. Max 56 characters.
   GCS_LOCATION           Optional. Default: us-central1
+
+  ATLAS_PUBLIC_KEY       Required by `atlas`. Org API key, created in the
+  ATLAS_PRIVATE_KEY      Atlas UI -- there is no way to mint the first one.
+  ATLAS_PROJECT_ID       Required by `atlas`. Setup does not create the project.
+  ATLAS_ORG_ID           Optional.
   GCP_INSTANCE_SLUG      Optional. Set to pin or re-adopt an instance.
   HOST_OUTPUT_DIR        Optional. Host path of the /output mount, recorded in
                          emitted files so paths resolve outside the container.
                          Default: ./output
+
+Configuration can come from the command line or a file. Explicit -e wins,
+then the file, then values recorded by earlier runs, then defaults.
+
+  podman run --rm --env-file .env ...              read by podman
+  podman run --rm -v "$PWD/.env:/config/.env:ro" ...  read by the container
 
 Bootstrap needs an interactive terminal and a writable output volume:
 
@@ -169,6 +220,8 @@ authenticate_human() {
 main() {
   local noun="${1:-help}"
 
+  load_config_env
+
   case "$noun" in
     help|-h|--help)
       usage
@@ -240,6 +293,24 @@ EOF
         *)
           usage
           die "gcp: unknown verb '$verb'"
+          ;;
+      esac
+      ;;
+    atlas)
+      local verb="${2:-}"
+      [[ -n "$verb" ]] || { usage; die "atlas: a verb is required"; }
+      shift 2
+      case "$verb" in
+        status)
+          authenticate_atlas
+          "$SCRIPTS_DIR/atlas-status.sh" "$@"
+          ;;
+        infra|data|setup|validate|destroy)
+          die "atlas $verb: not implemented yet"
+          ;;
+        *)
+          usage
+          die "atlas: unknown verb '$verb'"
           ;;
       esac
       ;;

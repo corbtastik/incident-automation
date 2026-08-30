@@ -25,6 +25,7 @@ LOCATION="${GCS_LOCATION:-us-central1}"
 validate_bucket_base_name "$BASE"
 
 echo "project: ${PROJECT}"
+require_project_access "$PROJECT"
 echo
 
 # --- resolve the instance ---------------------------------------------------
