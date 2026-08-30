@@ -57,11 +57,12 @@ else
   esac
 fi
 
+slug_is_generated=0
 if [[ -z "$bucket" ]]; then
-  slug="$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 6 || true)"
-  [[ ${#slug} -eq 6 ]] || die "could not generate an instance slug"
+  slug="$(generate_slug)" || die "could not generate an instance slug"
   bucket="${BASE}-${slug}"
   origin="generated"
+  slug_is_generated=1
 fi
 
 echo "instance"
@@ -74,24 +75,39 @@ echo "bucket"
 if gcloud storage buckets describe "gs://${bucket}" >/dev/null 2>&1; then
   echo "  gs://${bucket} (exists)"
 else
-  if ! err="$(gcloud storage buckets create "gs://${bucket}" \
-      --location="$LOCATION" \
-      --uniform-bucket-level-access \
-      --public-access-prevention 2>&1 >/dev/null)"; then
-    # A 409 here means the name is taken in the global namespace, which is a
-    # different problem from a permissions failure and needs a different fix.
+  # Bucket names share one global namespace, so a create can lose a race with
+  # a stranger. The slug exists precisely so that is recoverable: pick another
+  # one and try again. Only when we generated the name, though -- silently
+  # changing a name the operator pinned, or one a previous run recorded, would
+  # orphan the earlier instance.
+  attempt=1
+  while :; do
+    if err="$(gcloud storage buckets create "gs://${bucket}" \
+        --location="$LOCATION" \
+        --uniform-bucket-level-access \
+        --public-access-prevention 2>&1 >/dev/null)"; then
+      echo "  gs://${bucket} (created)"
+      break
+    fi
+
     case "$err" in
-      *409*|*"already own"*|*"already exists"*)
+      *409*|*"already own"*|*"already exists"*|*"HTTPError 409"*)
+        if [[ $slug_is_generated -eq 1 && $attempt -lt 5 ]]; then
+          echo "  gs://${bucket} is taken, trying another slug"
+          slug="$(generate_slug)" || die "could not generate an instance slug"
+          bucket="${BASE}-${slug}"
+          attempt=$((attempt + 1))
+          continue
+        fi
         echo "$err" >&2
-        die "gs://${bucket} is taken -- rerun to generate a different slug, or set GCS_BUCKET_BASE_NAME"
+        die "gs://${bucket} is taken -- choose a different GCS_BUCKET_BASE_NAME or GCP_INSTANCE_SLUG"
         ;;
       *)
         echo "$err" >&2
         die "could not create gs://${bucket}"
         ;;
     esac
-  fi
-  echo "  gs://${bucket} (created)"
+  done
 fi
 
 # `buckets create` takes no --labels, so labels are applied separately. This

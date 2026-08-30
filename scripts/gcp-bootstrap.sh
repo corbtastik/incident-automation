@@ -43,6 +43,11 @@ wait_for_sa() {
 echo "project: ${PROJECT}"
 echo
 
+# Before anything else: the storage API is needed by the verify step at the
+# end, and by every later verb.
+ensure_apis
+echo
+
 # --- service account -------------------------------------------------------
 echo "service account"
 if gcloud iam service-accounts describe "$SA_EMAIL" >/dev/null 2>&1; then
@@ -86,26 +91,11 @@ echo
 # `keys create` is not idempotent: every call mints another credential, and
 # the account caps out at ten. Reuse the existing one when it is still live.
 echo "key"
-reuse=0
-if [[ -f "$KEY_FILE" ]]; then
-  key_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("private_key_id",""))' \
-    "$KEY_FILE" 2>/dev/null || true)"
-  if [[ -n "$key_id" ]] && gcloud iam service-accounts keys list \
-        --iam-account="$SA_EMAIL" \
-        --managed-by=user \
-        --format='value(name)' 2>/dev/null | grep -q "$key_id"; then
-    reuse=1
-  fi
-fi
-
-if [[ $reuse -eq 1 ]]; then
+key_state="$(ensure_sa_key "$SA_EMAIL" "$KEY_FILE")" \
+  || die "could not create a key for ${SA_EMAIL}"
+if [[ "$key_state" == "existing" ]]; then
   echo "  ${HOST_OUTPUT_DIR}/gcp-bootstrap-key.json (existing, still valid)"
 else
-  umask 077
-  retry_propagation gcloud iam service-accounts keys create "$KEY_FILE" \
-    --iam-account="$SA_EMAIL" --quiet \
-    || die "could not create a key for ${SA_EMAIL}"
-  chmod 600 "$KEY_FILE"
   echo "  ${HOST_OUTPUT_DIR}/gcp-bootstrap-key.json (created)"
 fi
 echo

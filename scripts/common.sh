@@ -132,3 +132,36 @@ ensure_sa_key() {
   chmod 600 "$key_file"
   printf 'created'
 }
+
+# Six lowercase alphanumerics. Used for the bucket name and shared with the
+# runtime account, so the pair stays visibly associated.
+generate_slug() {
+  local slug
+  slug="$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 6 || true)"
+  [[ ${#slug} -eq 6 ]] || return 1
+  printf '%s' "$slug"
+}
+
+# Enabling an already-enabled API is a no-op that still reports success, so
+# check first and report what actually happened.
+REQUIRED_APIS=(storage.googleapis.com iam.googleapis.com)
+
+ensure_apis() {
+  local enabled api
+  echo "apis"
+  if [[ "${SKIP_API_ENABLE:-false}" == "true" ]]; then
+    echo "  skipped (SKIP_API_ENABLE=true)"
+    return 0
+  fi
+
+  enabled="$(gcloud services list --enabled --format='value(config.name)' 2>/dev/null || true)"
+  for api in "${REQUIRED_APIS[@]}"; do
+    if grep -qxF "$api" <<<"$enabled"; then
+      echo "  ${api} (enabled)"
+    else
+      retry_propagation gcloud services enable "$api" --quiet \
+        || die "could not enable ${api} -- enable it in the console, or set SKIP_API_ENABLE=true"
+      echo "  ${api} (turned on)"
+    fi
+  done
+}

@@ -41,7 +41,8 @@ Nouns and verbs:
   gcp apply       Create the media bucket and the runtime identity.
   gcp status      Report what exists. Changes nothing.
   gcp validate    Prove the runtime credential works. Changes nothing.
-  gcp destroy     Delete the media bucket. Takes --yes.
+  gcp destroy     Delete the media bucket and runtime account. Takes --yes.
+  gcp teardown    Delete the bootstrap account. Run after destroy. Takes --yes.
   help            Show this message.
 
 Environment:
@@ -143,7 +144,7 @@ authenticate_service_account() {
 # create a service account and grant it project-level roles.
 authenticate_human() {
   [[ -z "${GCP_CREDENTIALS_JSON:-}" ]] || die \
-    "bootstrap runs as you, not as a service account -- unset GCP_CREDENTIALS_JSON"
+    "this command runs as you, not as a service account -- unset GCP_CREDENTIALS_JSON"
 
   # gcloud writes logs and cache into its config directory, so a read-only
   # mount has to be copied somewhere writable before use.
@@ -158,7 +159,7 @@ authenticate_human() {
   fi
 
   [[ -t 0 ]] || die \
-    "bootstrap needs an interactive terminal for sign-in -- add -it to podman run"
+    "this command needs an interactive terminal for sign-in -- add -it to podman run"
 
   echo "no active account; starting sign-in"
   CLOUDSDK_CORE_DISABLE_PROMPTS=0 gcloud auth login --no-launch-browser \
@@ -226,6 +227,15 @@ EOF
           require_output_dir
           authenticate_service_account
           "$SCRIPTS_DIR/gcp-destroy.sh" "$@"
+          ;;
+        teardown)
+          # Runs as the operator: removing project-level bindings needs
+          # permissions the bootstrap account does not hold.
+          require_project
+          require_output_dir
+          authenticate_human
+          echo
+          "$SCRIPTS_DIR/gcp-teardown.sh" "$@"
           ;;
         *)
           usage

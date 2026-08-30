@@ -18,14 +18,18 @@ own environment rather than sharing a hosted one.
 | `gcp status` | Reports what exists. Changes nothing |
 | `gcp validate` | Activates the runtime key and reads the bucket as that identity. Changes nothing |
 | `gcp destroy` | Deletes the bucket and the runtime service account. Takes `--yes` |
+| `gcp teardown` | Deletes the bootstrap service account and its roles. Run after `destroy`. Takes `--yes` |
 | `help` | Usage |
 
 ## Prerequisites
 
 1. A GCP account, and a project you own. Setup does not create the project.
 2. Billing enabled on it.
-3. The Cloud Storage API enabled on it.
-4. Podman.
+3. Podman.
+
+The Cloud Storage and IAM APIs are turned on for you by `bootstrap`. Set
+`SKIP_API_ENABLE=true` if your account lacks `serviceusage.serviceUsageAdmin`
+and you would rather enable them in the console.
 
 `gcloud` on your machine is optional. If it is installed and authenticated,
 mount its config and `bootstrap` uses it. If not, `bootstrap` signs you in
@@ -104,6 +108,7 @@ Both apps already read `MEDIA_GCS_BUCKET` from the environment.
 | `GCP_INSTANCE_SLUG` | no | generated. Set to pin or re-adopt an instance |
 | `BOOTSTRAP_SA_NAME` | no | `incident-automation-bootstrap` |
 | `RUNTIME_SA_NAME_BASE` | no | `incident-app-storage` |
+| `SKIP_API_ENABLE` | no | `false` |
 | `HOST_OUTPUT_DIR` | no | `./output` — host path, so emitted files carry paths that resolve outside the container |
 
 See `.env.example`.
@@ -114,6 +119,11 @@ Every verb is idempotent. An existing account, bucket, binding or live key is
 reused rather than recreated. Key reuse matters more than it looks: `keys
 create` mints a new credential on every call, accounts cap at ten, and an
 orphaned key is impossible to tell apart from the live one.
+
+Bucket names share one global namespace, so a create can lose a race with a
+stranger. When `apply` generated the name itself it picks a new slug and
+retries; when the slug was pinned or recorded by an earlier run it stops
+instead, since silently changing that name would orphan the earlier instance.
 
 New IAM and storage objects propagate through GCP subsystems independently, so
 calls retry on the three symptoms that produces — `does not exist`,
@@ -128,14 +138,24 @@ immediately, so real errors are not buried.
 podman run --rm -v "$PWD/output:/output" incident-automation gcp destroy --yes
 
 # bootstrap service account, its roles, its key, bootstrap.env
-./dev-reset.sh -y
+podman run --rm -it \
+  -v ~/.config/gcloud:/gcloud-host:ro \
+  -v "$PWD/output:/output" \
+  -e GCP_PROJECT_ID=your-project-id \
+  incident-automation gcp teardown --yes
 ```
 
-Order matters — `destroy` runs as the bootstrap account.
+Order matters, and `teardown` enforces it: it refuses while a labelled bucket
+still exists, because `destroy` runs as the bootstrap account and removing
+that account first would strand the bucket. `--force` overrides.
 
-`dev-reset.sh` runs on your host with your own gcloud, and is the one step
-that still requires gcloud to be installed. It is temporary: a teardown verb
-will replace it.
+`teardown` runs as you, for the same reason `bootstrap` does — removing
+project-level role bindings needs permissions the bootstrap account
+deliberately does not have.
+
+APIs are left enabled. This runs in a project you own and may share with
+unrelated work, so turning off `storage.googleapis.com` on the way out would
+be destructive well beyond this demo.
 
 ## Layout
 
@@ -143,15 +163,10 @@ will replace it.
 containers/   Containerfile and entrypoint
 scripts/      common.sh plus one script per verb
 output/       emitted keys and records. gitignored
-dev-reset.sh  host-side bootstrap teardown, temporary
 ```
 
 ## Not done yet
 
-- Enabling the Cloud Storage API automatically, so it stops being a manual
-  prerequisite
-- Regenerating the slug automatically when a bucket name is already taken
-- A teardown verb for the bootstrap account, replacing `dev-reset.sh`
 - Publishing the image, so users do not have to build it
 - Everything Atlas
 
