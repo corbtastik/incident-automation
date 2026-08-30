@@ -12,7 +12,9 @@ set -euo pipefail
 
 SCRIPTS_DIR="${SCRIPTS_DIR:-/opt/incident-automation/scripts}"
 MOUNTED_CONFIG="${MOUNTED_CONFIG:-/gcloud-host}"
-OUTPUT_DIR="${OUTPUT_DIR:-/output}"
+
+# shellcheck source=/dev/null
+source "${SCRIPTS_DIR}/common.sh"
 
 # gcloud should never prompt or try to open a browser by default. The human
 # login path re-enables prompts for that one call.
@@ -34,8 +36,12 @@ Usage:
   <noun> <verb>
 
 Nouns and verbs:
+  gcp setup       bootstrap + apply, in one command. The usual entry point.
   gcp bootstrap   Create the bootstrap service account and key. Run once.
+  gcp apply       Create the media bucket and the runtime identity.
   gcp status      Report what exists. Changes nothing.
+  gcp validate    Prove the runtime credential works. Changes nothing.
+  gcp destroy     Delete the media bucket. Takes --yes.
   help            Show this message.
 
 Environment:
@@ -43,6 +49,10 @@ Environment:
   GCP_CREDENTIALS_JSON   Bootstrap service account key, as JSON. Required by
                          every verb except `bootstrap`, which creates it.
   BOOTSTRAP_SA_NAME      Optional. Default: incident-automation-bootstrap
+  GCS_BUCKET_BASE_NAME   Required by `apply`. A random slug is appended, so
+                         the bucket is <base>-<slug>. Max 56 characters.
+  GCS_LOCATION           Optional. Default: us-central1
+  GCP_INSTANCE_SLUG      Optional. Set to pin or re-adopt an instance.
   HOST_OUTPUT_DIR        Optional. Host path of the /output mount, recorded in
                          emitted files so paths resolve outside the container.
                          Default: ./output
@@ -65,8 +75,6 @@ is no /output volume.
 Not yet implemented: gcp apply | validate | destroy.
 EOF
 }
-
-die() { echo "error: $*" >&2; exit 1; }
 
 require_project() {
   if [[ -z "${GCP_PROJECT_ID:-}" ]]; then
@@ -169,19 +177,55 @@ main() {
       [[ -n "$verb" ]] || { usage; die "gcp: a verb is required"; }
       shift 2
       case "$verb" in
+        setup)
+          # Validate everything before anything is created. Otherwise a
+          # missing bucket name is discovered only after the operator has
+          # signed in and a service account, four roles and a key exist.
+          require_project
+          require_output_dir
+          validate_bucket_base_name "${GCS_BUCKET_BASE_NAME:-}"
+          authenticate_human
+          echo
+          SETUP_CHAIN=1 "$SCRIPTS_DIR/gcp-bootstrap.sh"
+          echo
+          SETUP_CHAIN=1 "$SCRIPTS_DIR/gcp-apply.sh"
+          cat <<EOF
+
+setup complete
+
+Next:
+
+  podman run --rm -v "\$PWD/output:/output" incident-automation gcp status
+EOF
+          ;;
         bootstrap)
           require_project
           require_output_dir
           authenticate_human
           "$SCRIPTS_DIR/gcp-bootstrap.sh" "$@"
           ;;
+        apply)
+          require_project
+          require_output_dir
+          authenticate_service_account
+          "$SCRIPTS_DIR/gcp-apply.sh" "$@"
+          ;;
         status)
           require_project
           authenticate_service_account
           "$SCRIPTS_DIR/gcp-status.sh" "$@"
           ;;
-        apply|validate|destroy)
-          die "gcp $verb: not implemented yet"
+        validate)
+          require_project
+          require_output_dir
+          authenticate_service_account
+          "$SCRIPTS_DIR/gcp-validate.sh" "$@"
+          ;;
+        destroy)
+          require_project
+          require_output_dir
+          authenticate_service_account
+          "$SCRIPTS_DIR/gcp-destroy.sh" "$@"
           ;;
         *)
           usage

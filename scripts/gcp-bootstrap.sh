@@ -11,17 +11,15 @@
 # rather than minting a second one.
 #
 set -euo pipefail
+# shellcheck source=/dev/null
+source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 PROJECT="${CLOUDSDK_CORE_PROJECT:?project not set}"
 SA_NAME="${BOOTSTRAP_SA_NAME:-incident-automation-bootstrap}"
 SA_EMAIL="${SA_NAME}@${PROJECT}.iam.gserviceaccount.com"
 
-OUTPUT_DIR="${OUTPUT_DIR:-/output}"
 KEY_FILE="${OUTPUT_DIR}/gcp-bootstrap-key.json"
 ENV_FILE="${OUTPUT_DIR}/bootstrap.env"
-
-# Host-side path, so the emitted file is usable outside the container.
-HOST_OUTPUT_DIR="${HOST_OUTPUT_DIR:-./output}"
 
 ROLES=(
   roles/storage.admin
@@ -30,66 +28,17 @@ ROLES=(
   roles/serviceusage.serviceUsageAdmin
 )
 
-# gcloud writes progress lines ("Created service account...", "Updated IAM
-# policy...") to stderr, so >/dev/null alone does not silence them. Capture
-# stderr and surface it only when the call actually fails.
-die() { echo "error: $*" >&2; exit 1; }
-
-run_quiet() {
-  local err
-  if ! err="$("$@" 2>&1 >/dev/null)"; then
-    [[ -n "$err" ]] && echo "$err" >&2
-    return 1
-  fi
-  return 0
-}
-
-# Service account creation is eventually consistent. `describe` and
-# `keys create` can both 404 for several seconds after `create` returns --
-# longer when the same email was recently deleted and recreated, because the
-# old identity is still cached.
+# `describe` can 404 for several seconds after `create` returns, longer when
+# the same email was recently deleted and recreated.
 wait_for_sa() {
   local attempt
   for attempt in $(seq 1 30); do
-    if gcloud iam service-accounts describe "$SA_EMAIL" >/dev/null 2>&1; then
-      return 0
-    fi
+    gcloud iam service-accounts describe "$SA_EMAIL" >/dev/null 2>&1 && return 0
     sleep 2
   done
   return 1
 }
 
-# New IAM objects propagate through GCP subsystems independently, and each
-# one reports its own symptom while it catches up:
-#
-#   does not exist / NOT_FOUND     identity not visible to this API yet
-#   invalid_grant / JWT Signature  key exists but is not usable for tokens yet
-#   PERMISSION_DENIED / 403        role binding not yet in effect
-#
-# Retry those; fail immediately on anything else so real errors are not
-# buried. A genuine misconfiguration still surfaces, just after the window.
-RETRY_ATTEMPTS="${RETRY_ATTEMPTS:-20}"
-RETRY_SLEEP="${RETRY_SLEEP:-3}"
-
-retry_propagation() {
-  local attempt err=""
-  for attempt in $(seq 1 "$RETRY_ATTEMPTS"); do
-    if err="$("$@" 2>&1 >/dev/null)"; then
-      return 0
-    fi
-    case "$err" in
-      *"does not exist"*|*NOT_FOUND*|*invalid_grant*|*"Invalid JWT Signature"*|*PERMISSION_DENIED*|*"403"*)
-        sleep "$RETRY_SLEEP"
-        ;;
-      *)
-        [[ -n "$err" ]] && echo "$err" >&2
-        return 1
-        ;;
-    esac
-  done
-  [[ -n "$err" ]] && echo "$err" >&2
-  return 1
-}
 
 echo "project: ${PROJECT}"
 echo
@@ -201,8 +150,13 @@ done
   key               ${HOST_OUTPUT_DIR}/gcp-bootstrap-key.json
   user-managed keys ${key_count}
   record            ${HOST_OUTPUT_DIR}/bootstrap.env
+EOF
+
+if [[ "${SETUP_CHAIN:-0}" != "1" ]]; then
+  cat <<EOF
 
 Next:
 
   podman run --rm -v "\$PWD/output:/output" incident-automation gcp status
 EOF
+fi

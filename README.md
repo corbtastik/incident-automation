@@ -8,15 +8,16 @@ own environment rather than sharing a hosted one.
 
 ## Status
 
-**Phase 0 complete.** The container authenticates and can create the scoped
-service account that later phases run as. No buckets, no Atlas resources yet.
-
-Implemented and tested:
+**GCP provisioning is complete and tested.** Atlas has not been started.
 
 | Command | What it does |
 |---|---|
-| `gcp bootstrap` | Creates the automation service account, grants its roles, issues a key, and verifies the key works |
-| `gcp status` | Reports the authenticated identity and checks the Storage API is reachable. Changes nothing |
+| `gcp setup` | `bootstrap` + `apply` in one command. The usual entry point |
+| `gcp bootstrap` | Creates the automation service account, grants its roles, issues a key, verifies it |
+| `gcp apply` | Creates the media bucket, the runtime service account, its bucket-scoped role and key |
+| `gcp status` | Reports what exists. Changes nothing |
+| `gcp validate` | Activates the runtime key and reads the bucket as that identity. Changes nothing |
+| `gcp destroy` | Deletes the bucket and the runtime service account. Takes `--yes` |
 | `help` | Usage |
 
 ## Prerequisites
@@ -25,122 +26,153 @@ Implemented and tested:
 2. Billing enabled on it.
 3. The Cloud Storage API enabled on it.
 4. Podman.
-5. `gcloud` authenticated on your machine (`gcloud auth login`), or be ready
-   to sign in interactively — see below.
 
-You do **not** need to create a service account by hand. That is what
-`gcp bootstrap` is for.
+`gcloud` on your machine is optional. If it is installed and authenticated,
+mount its config and `bootstrap` uses it. If not, `bootstrap` signs you in
+interactively with a URL and a verification code.
+
+You do not need to create a service account by hand.
 
 ## Run it
 
-Build:
-
 ```bash
 podman build -f containers/Containerfile -t incident-automation .
-```
-
-Bootstrap, once. This is the only command that runs as you:
-
-```bash
 mkdir -p output
 
 podman run --rm \
   -v ~/.config/gcloud:/gcloud-host:ro \
   -v "$PWD/output:/output" \
   -e GCP_PROJECT_ID=your-project-id \
-  incident-automation gcp bootstrap
+  -e GCS_BUCKET_BASE_NAME=incident-app \
+  incident-automation gcp setup
 ```
 
-It creates `incident-automation-bootstrap@<project>.iam.gserviceaccount.com`,
-grants it four roles, writes `output/gcp-bootstrap-key.json` and
-`output/bootstrap.env`, then activates the new key and proves it can reach the
-Storage API.
+Without gcloud on your machine, drop the `~/.config/gcloud` mount and add
+`-it` for the interactive sign-in.
 
-Everything afterwards is non-interactive, and reads the project and key from
-`output/`:
+Everything afterwards reads the project and key from `output/`, so no flags
+are needed:
 
 ```bash
 podman run --rm -v "$PWD/output:/output" incident-automation gcp status
+podman run --rm -v "$PWD/output:/output" incident-automation gcp validate
 ```
 
-### Without gcloud on your machine
-
-Drop the `~/.config/gcloud` mount and add `-it`. The container will print a
-URL and a code for browser sign-in:
-
-```bash
-podman run --rm -it \
-  -v "$PWD/output:/output" \
-  -e GCP_PROJECT_ID=your-project-id \
-  incident-automation gcp bootstrap
-```
-
-## What bootstrap creates
+## What it creates
 
 | Resource | Detail |
 |---|---|
-| Service account | `incident-automation-bootstrap` |
-| Roles | `storage.admin`, `iam.serviceAccountAdmin`, `iam.serviceAccountKeyAdmin`, `serviceusage.serviceUsageAdmin` |
-| Key | `output/gcp-bootstrap-key.json`, mode 600 |
-| Record | `output/bootstrap.env` |
+| Bootstrap service account | `incident-automation-bootstrap`, with `storage.admin`, `iam.serviceAccountAdmin`, `iam.serviceAccountKeyAdmin`, `serviceusage.serviceUsageAdmin` |
+| Bucket | `<base>-<slug>`, uniform access, public access prevented, labelled `managed-by=incident-automation` |
+| Runtime service account | `incident-app-storage-<slug>`, with `roles/storage.objectViewer` **on the bucket only** |
+| Keys | `output/gcp-bootstrap-key.json`, `output/gcp-runtime-key.json`, mode 600 |
+| Records | `output/bootstrap.env`, `output/gcp.env` |
 
-Re-running is safe. An existing account is reused and an existing live key is
-kept, so repeated runs do not accumulate credentials — service accounts cap at
-ten keys, and an orphaned one is impossible to tell apart from the live one.
+Two accounts, not one. The bootstrap account administers; the runtime account
+is what the demo apps authenticate as, and it can do nothing but read objects
+from its own bucket.
 
-New IAM objects propagate through GCP subsystems independently, so bootstrap
-retries on the three symptoms that means: `does not exist`, `invalid_grant` /
-`Invalid JWT Signature`, and `PERMISSION_DENIED`. A run may pause for a few
-seconds at those points on a fresh create.
+Bucket names are globally unique, so a fixed name would collide for the second
+person who ever ran this. The generated slug also acts as an instance id,
+letting two demos coexist in one project. Because the name cannot be
+recomputed from inputs, the bucket is labelled — `status`, `validate` and
+`destroy` rediscover it even if `output/` is lost.
+
+### output/gcp.env
+
+This is the contract with the demo apps:
+
+```
+GCP_PROJECT_ID=...
+GCP_INSTANCE_SLUG=...
+GCS_LOCATION=...
+MEDIA_GCS_BUCKET=<base>-<slug>
+GOOGLE_APPLICATION_CREDENTIALS=./output/gcp-runtime-key.json
+RUNTIME_SA_EMAIL=...
+```
+
+Both apps already read `MEDIA_GCS_BUCKET` from the environment.
 
 ## Environment
 
 | Variable | Required | Default |
 |---|---|---|
-| `GCP_PROJECT_ID` | yes, for the first bootstrap | read from `output/bootstrap.env` afterwards |
+| `GCP_PROJECT_ID` | first run only | then read from `output/bootstrap.env` |
+| `GCS_BUCKET_BASE_NAME` | `apply` and `setup` | none. Max 56 characters, lowercase |
 | `GCP_CREDENTIALS_JSON` | no | read from `output/gcp-bootstrap-key.json`. Overrides it when set, for CI where there is no `/output` |
+| `GCS_LOCATION` | no | `us-central1` |
+| `GCP_INSTANCE_SLUG` | no | generated. Set to pin or re-adopt an instance |
 | `BOOTSTRAP_SA_NAME` | no | `incident-automation-bootstrap` |
+| `RUNTIME_SA_NAME_BASE` | no | `incident-app-storage` |
 | `HOST_OUTPUT_DIR` | no | `./output` — host path, so emitted files carry paths that resolve outside the container |
 
 See `.env.example`.
 
-## Resetting
+## Re-running
 
-`dev-reset.sh` undoes a bootstrap: removes the role bindings, deletes the
-service account, and clears `output/`. It runs on your host with your own
-gcloud, not in the container.
+Every verb is idempotent. An existing account, bucket, binding or live key is
+reused rather than recreated. Key reuse matters more than it looks: `keys
+create` mints a new credential on every call, accounts cap at ten, and an
+orphaned key is impossible to tell apart from the live one.
+
+New IAM and storage objects propagate through GCP subsystems independently, so
+calls retry on the three symptoms that produces — `does not exist`,
+`invalid_grant` / `Invalid JWT Signature`, and `PERMISSION_DENIED`. A run may
+pause for a few seconds at those points on a fresh create. Anything else fails
+immediately, so real errors are not buried.
+
+## Tearing down
 
 ```bash
-./dev-reset.sh        # prompts
-./dev-reset.sh -y     # no prompt
+# bucket, runtime service account, runtime key, gcp.env
+podman run --rm -v "$PWD/output:/output" incident-automation gcp destroy --yes
+
+# bootstrap service account, its roles, its key, bootstrap.env
+./dev-reset.sh -y
 ```
 
-Temporary — it goes away once `gcp destroy` exists.
+Order matters — `destroy` runs as the bootstrap account.
+
+`dev-reset.sh` runs on your host with your own gcloud, and is the one step
+that still requires gcloud to be installed. It is temporary: a teardown verb
+will replace it.
 
 ## Layout
 
 ```
 containers/   Containerfile and entrypoint
-scripts/      the scripts each verb runs
-output/       emitted key and record. gitignored
-dev-reset.sh  host-side teardown, temporary
+scripts/      common.sh plus one script per verb
+output/       emitted keys and records. gitignored
+dev-reset.sh  host-side bootstrap teardown, temporary
 ```
+
+## Not done yet
+
+- Enabling the Cloud Storage API automatically, so it stops being a manual
+  prerequisite
+- Regenerating the slug automatically when a bucket name is already taken
+- A teardown verb for the bootstrap account, replacing `dev-reset.sh`
+- Publishing the image, so users do not have to build it
+- Everything Atlas
 
 ## Decisions
 
-- **gcloud, not Terraform**, for the GCP phase. It is a handful of resources
-  in a project you already own, and skipping Terraform removes a state file
-  that has to survive between container runs.
+- **gcloud, not Terraform**, for the GCP side. It is a handful of resources in
+  a project you already own, and skipping Terraform removes a state file that
+  would have to survive between container runs. Resources are found by label
+  instead. Atlas will use Terraform, where the resource count justifies it.
 - **Podman**, not Docker.
-- **One container, verb subcommands** (`<noun> <verb>`), so later phases add
-  verbs rather than images.
+- **One container, verb subcommands**, so later phases add verbs, not images.
 - **Bring your own GCP project.** Creating one needs billing and org
   permissions a personal account often lacks, and failures there have nothing
   to do with the demo.
-- **Secrets passed as arguments**, never baked into the image. The one
-  exception is bootstrap, which needs your own identity and so reads a mounted
-  gcloud config or signs you in.
-- **A scoped bootstrap account.** It cannot create itself — granting
-  project-level roles needs permissions it deliberately does not have — so the
-  first authentication is always human. Everything after runs as the scoped
-  account.
+- **Secrets passed as arguments**, never baked into the image. The exception is
+  `bootstrap`, which needs your own identity and so reads a mounted gcloud
+  config or signs you in.
+- **A privilege ladder.** You (owner) create the bootstrap account; it creates
+  the runtime account; the runtime account can only read one bucket. The
+  bootstrap account cannot create itself, because granting project-level roles
+  needs permissions it deliberately does not have.
+- **Base image is `gcr.io/google.com/cloudsdktool/google-cloud-cli`**, not the
+  legacy `docker.io/google/cloud-sdk` mirror, which is amd64-only and forces
+  emulation on Apple Silicon.
