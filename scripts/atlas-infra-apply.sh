@@ -34,6 +34,15 @@ SEARCH_NODE_COUNT="${ATLAS_SEARCH_NODE_COUNT:-2}"
 CLUSTER_TIMEOUT="${ATLAS_CLUSTER_TIMEOUT:-1800}"
 SEARCH_TIMEOUT="${ATLAS_SEARCH_TIMEOUT:-1800}"
 
+assume_yes=0
+dry_run=0
+for arg in "$@"; do
+  case "$arg" in
+    -y|--yes)  assume_yes=1 ;;
+    --dry-run) dry_run=1 ;;
+  esac
+done
+
 echo "project: ${PROJECT_ID}"
 echo
 
@@ -84,6 +93,79 @@ echo "  slug:    ${slug} (${origin})"
 echo "  cluster: ${cluster}"
 echo "  target:  ${TIER} on ${PROVIDER} ${REGION}, ${MEMBERS} members"
 echo
+
+# --- plan -------------------------------------------------------------------
+# Provisioning takes 20-25 minutes and bills continuously, so say what will
+# happen before doing any of it. Re-runs are common here, and most of the time
+# the honest answer is "almost nothing".
+plan_create=()
+plan_exists=()
+
+if atlas clusters describe "$cluster" -o json >/dev/null 2>&1; then
+  plan_exists+=("cluster        ${cluster}")
+  if atlas clusters search nodes list --clusterName "$cluster" -o json 2>/dev/null \
+      | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("specs") else 1)' 2>/dev/null; then
+    plan_exists+=("search nodes   deployed")
+  else
+    plan_create+=("search nodes   ${SEARCH_NODE_COUNT} x ${SEARCH_NODE_SIZE}")
+  fi
+else
+  plan_create+=("cluster        ${cluster}  (${TIER}, ${PROVIDER} ${REGION}, ${MEMBERS} members)")
+  plan_create+=("search nodes   ${SEARCH_NODE_COUNT} x ${SEARCH_NODE_SIZE}")
+fi
+
+planned_user="incident-${slug}"
+if atlas dbusers describe "$planned_user" -o json >/dev/null 2>&1 \
+   && [[ -n "$(read_env_value "$ATLAS_ENV_FILE" ATLAS_DB_PASSWORD 2>/dev/null || true)" ]]; then
+  plan_exists+=("database user  ${planned_user}")
+else
+  plan_create+=("database user  ${planned_user}")
+fi
+
+if atlas accessLists describe "0.0.0.0/0" -o json >/dev/null 2>&1; then
+  plan_exists+=("access list    0.0.0.0/0")
+else
+  plan_create+=("access list    0.0.0.0/0")
+fi
+
+planned_spi="incident-${slug}-spi"
+if atlas api streams getStreamInstance --groupId "$PROJECT_ID" --tenantName "$planned_spi" >/dev/null 2>&1; then
+  plan_exists+=("stream         ${planned_spi}")
+  for conn in "${STREAM_CONNECTIONS[@]}"; do
+    if atlas streams connections describe "$conn" --instance "$planned_spi" -o json >/dev/null 2>&1; then
+      plan_exists+=("connection     ${conn}")
+    else
+      plan_create+=("connection     ${conn}")
+    fi
+  done
+else
+  plan_create+=("stream         ${planned_spi}  (${SPI_TIER}, ${SPI_PROVIDER} ${SPI_REGION})")
+  for conn in "${STREAM_CONNECTIONS[@]}"; do
+    plan_create+=("connection     ${conn}")
+  done
+fi
+
+echo "plan"
+if [[ ${#plan_create[@]} -eq 0 ]]; then
+  echo "  nothing to create -- everything is already provisioned"
+else
+  printf '  create  %s\n' "${plan_create[@]}"
+fi
+[[ ${#plan_exists[@]} -gt 0 ]] && printf '  exists  %s\n' "${plan_exists[@]}"
+echo
+
+if [[ $dry_run -eq 1 ]]; then
+  echo "dry run -- nothing was created"
+  exit 0
+fi
+
+# Creating is the intended action, so a non-interactive run proceeds rather
+# than refusing. destroy is the opposite, and refuses without --yes.
+if [[ ${#plan_create[@]} -gt 0 && $assume_yes -eq 0 && -t 0 ]]; then
+  read -r -p "proceed? [y/N] " reply
+  [[ "$reply" == "y" || "$reply" == "Y" ]] || { echo "aborted"; exit 0; }
+  echo
+fi
 
 # --- cluster ----------------------------------------------------------------
 echo "cluster"

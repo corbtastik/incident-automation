@@ -83,7 +83,10 @@ Nouns and verbs:
 
   atlas status          Report Atlas project state. Changes nothing.
   atlas infra apply     Create the cluster, search nodes, db user, access
-                        list, stream instance and connections.
+                        list, stream instance and connections. Takes --yes
+                        and --dry-run.
+  atlas infra validate  Connect with the recorded URI and check the infra.
+                        Changes nothing.
   atlas infra destroy   Delete them. Takes --yes and --dry-run.
 
   help            Show this message.
@@ -323,8 +326,9 @@ EOF
           require_output_dir
           authenticate_atlas
           case "$sub" in
-            apply)   "$SCRIPTS_DIR/atlas-infra-apply.sh" "$@" ;;
-            destroy) "$SCRIPTS_DIR/atlas-infra-destroy.sh" "$@" ;;
+            apply)    "$SCRIPTS_DIR/atlas-infra-apply.sh" "$@" ;;
+            validate) "$SCRIPTS_DIR/atlas-infra-validate.sh" "$@" ;;
+            destroy)  "$SCRIPTS_DIR/atlas-infra-destroy.sh" "$@" ;;
             *) usage; die "atlas infra: unknown verb '$sub'" ;;
           esac
           ;;
