@@ -233,3 +233,39 @@ require_project_access() {
   echo "$err" >&2
   die "cannot use project '${project}' as ${active:-the active account} -- check GCP_PROJECT_ID"
 }
+
+# Atlas resources this tool owns carry these tags. Clusters support tags
+# directly; everything else is matched by the slug in its name.
+ATLAS_TAG_OWNER="managed-by=incident-automation"
+
+# Cluster provisioning and search node deployment take minutes, not seconds,
+# and vary with time of day and regional load. Poll with visible progress so a
+# long wait is distinguishable from a hang.
+#
+# $1 description, $2 timeout seconds, $3.. command whose stdout is the state
+atlas_wait_for_state() {
+  local what="$1" timeout="$2" target="$3"; shift 3
+  local waited=0 interval=15 state=""
+
+  while [[ $waited -lt $timeout ]]; do
+    state="$("$@" 2>/dev/null || true)"
+    if [[ "$state" == "$target" ]]; then
+      [[ $waited -gt 0 ]] && echo "  ${what}: ${target} after ${waited}s"
+      return 0
+    fi
+    sleep "$interval"
+    waited=$((waited + interval))
+    echo "  ${what}: ${state:-unknown} (${waited}s)"
+  done
+
+  echo "  ${what}: gave up after ${timeout}s in state ${state:-unknown}" >&2
+  return 1
+}
+
+# URI-safe: the password ends up inside a connection string.
+generate_password() {
+  local pw
+  pw="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 28 || true)"
+  [[ ${#pw} -eq 28 ]] || return 1
+  printf '%s' "$pw"
+}

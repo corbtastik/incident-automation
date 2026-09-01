@@ -50,19 +50,34 @@ else
 fi
 echo
 
+# Search nodes are per-cluster, so this needs a cluster name: the one a
+# previous apply recorded, else any cluster tagged as ours.
 echo "search nodes"
-if nodes="$(atlas clusters search nodes list -o json 2>/dev/null)"; then
+sn_cluster="$(read_env_value "$ATLAS_ENV_FILE" ATLAS_CLUSTER_NAME 2>/dev/null || true)"
+if [[ -z "$sn_cluster" ]]; then
+  sn_cluster="$(atlas clusters list -o json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+names = [c.get("name") for c in d.get("results", d if isinstance(d, list) else [])
+         if {t.get("key"): t.get("value") for t in (c.get("tags") or [])}.get("managed-by") == "incident-automation"]
+print(names[0] if names else "")
+' || true)"
+fi
+
+if [[ -z "$sn_cluster" ]]; then
+  echo "  no cluster of ours to check"
+elif nodes="$(atlas clusters search nodes list --clusterName "$sn_cluster" -o json 2>/dev/null)"; then
   python3 -c '
 import json, sys
 d = json.loads(sys.argv[1])
 specs = d.get("specs", [])
 if not specs:
-    print("  none")
+    print("  none on %s" % sys.argv[2])
 for s in specs:
-    print("  %s x%s" % (s.get("instanceSize", ""), s.get("nodeCount", "")))
-' "$nodes"
+    print("  %s: %s x %s  %s" % (sys.argv[2], s.get("nodeCount", ""), s.get("instanceSize", ""), d.get("stateName", "")))
+' "$nodes" "$sn_cluster"
 else
-  echo "  none"
+  echo "  none on ${sn_cluster}"
 fi
 echo
 

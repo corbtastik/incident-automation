@@ -81,7 +81,9 @@ Nouns and verbs:
   gcp destroy     Delete the media bucket and runtime account. Takes --yes.
   gcp teardown    Delete the bootstrap account. Run after destroy. Takes --yes.
 
-  atlas status    Report Atlas project state. Changes nothing.
+  atlas status          Report Atlas project state. Changes nothing.
+  atlas infra apply     Create the cluster, search nodes, db user, access list.
+  atlas infra destroy   Delete them. Takes --yes.
 
   help            Show this message.
 
@@ -98,6 +100,10 @@ Environment:
   ATLAS_PRIVATE_KEY      Atlas UI -- there is no way to mint the first one.
   ATLAS_PROJECT_ID       Required by `atlas`. Setup does not create the project.
   ATLAS_ORG_ID           Optional.
+  ATLAS_PROVIDER         Optional. Default: GCP
+  ATLAS_REGION           Optional. Default: CENTRAL_US
+  ATLAS_CLUSTER_TIER     Optional. Default: M10
+  ATLAS_INSTANCE_SLUG    Optional. Set to pin or re-adopt an instance.
   GCP_INSTANCE_SLUG      Optional. Set to pin or re-adopt an instance.
   HOST_OUTPUT_DIR        Optional. Host path of the /output mount, recorded in
                          emitted files so paths resolve outside the container.
@@ -305,7 +311,19 @@ EOF
           authenticate_atlas
           "$SCRIPTS_DIR/atlas-status.sh" "$@"
           ;;
-        infra|data|setup|validate|destroy)
+        infra)
+          local sub="${1:-}"
+          [[ -n "$sub" ]] || { usage; die "atlas infra: a verb is required"; }
+          shift
+          require_output_dir
+          authenticate_atlas
+          case "$sub" in
+            apply)   "$SCRIPTS_DIR/atlas-infra-apply.sh" "$@" ;;
+            destroy) "$SCRIPTS_DIR/atlas-infra-destroy.sh" "$@" ;;
+            *) usage; die "atlas infra: unknown verb '$sub'" ;;
+          esac
+          ;;
+        data|setup|validate|destroy)
           die "atlas $verb: not implemented yet"
           ;;
         *)
