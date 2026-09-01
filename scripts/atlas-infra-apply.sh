@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# atlas infra apply -- cluster, dedicated search nodes, database user, access list.
+# atlas infra apply -- cluster, dedicated search nodes, database user, access
+# list, stream processing instance and its connections.
 #
 # Everything is named `incident-<slug>` and the cluster is tagged, so this
 # never adopts or deletes resources it did not create. That matters more here
@@ -18,6 +19,14 @@ REGION="${ATLAS_REGION:-CENTRAL_US}"
 TIER="${ATLAS_CLUSTER_TIER:-M10}"
 MEMBERS="${ATLAS_CLUSTER_MEMBERS:-3}"
 DB_NAME="${DB_NAME:-incidents}"
+
+SPI_PROVIDER="${ATLAS_SPI_PROVIDER:-GCP}"
+SPI_REGION="${ATLAS_SPI_REGION:-US_CENTRAL1}"
+SPI_TIER="${ATLAS_SPI_TIER:-SP30}"
+
+# The pipelines reference these connection names in their $source stages, so
+# they are fixed, not configurable.
+STREAM_CONNECTIONS=(incident-events fix-events)
 
 SEARCH_NODE_SIZE="${ATLAS_SEARCH_NODE_SIZE:-S20_HIGHCPU_NVME}"
 SEARCH_NODE_COUNT="${ATLAS_SEARCH_NODE_COUNT:-2}"
@@ -175,6 +184,73 @@ else
 fi
 echo
 
+# --- stream processing ------------------------------------------------------
+# Stream instances carry no tags, so the name is the ownership marker and
+# destroy matches on it. That is what keeps an operator's own instance safe.
+spi="incident-${slug}-spi"
+
+echo "stream processing"
+if atlas api streams getStreamInstance --groupId "$PROJECT_ID" --tenantName "$spi" >/dev/null 2>&1; then
+  echo "  ${spi} (exists)"
+else
+  # The CLI's own `streams instances create` only offers AWS and AZURE, so
+  # the passthrough is used to keep the instance on the same cloud as the
+  # cluster. Note the region naming differs between the two: a cluster in
+  # CENTRAL_US pairs with an instance in US_CENTRAL1.
+  spi_spec="$(mktemp /tmp/spi.XXXXXX.json)"
+  cat > "$spi_spec" <<JSON
+{
+  "name": "${spi}",
+  "dataProcessRegion": { "cloudProvider": "${SPI_PROVIDER}", "region": "${SPI_REGION}" },
+  "streamConfig": { "tier": "${SPI_TIER}" }
+}
+JSON
+  if ! err="$(atlas api streams createStreamInstance --groupId "$PROJECT_ID" --file "$spi_spec" 2>&1 >/dev/null)"; then
+    rm -f "$spi_spec"
+    echo "$err" >&2
+    if atlas_is_capacity_error "$err"; then
+      die "no capacity for a ${SPI_TIER} instance in ${SPI_PROVIDER} ${SPI_REGION} -- try ATLAS_SPI_REGION or ATLAS_SPI_TIER"
+    fi
+    die "could not create stream instance ${spi}"
+  fi
+  rm -f "$spi_spec"
+  echo "  ${spi} (created, ${SPI_TIER} on ${SPI_PROVIDER} ${SPI_REGION})"
+
+  # No documented state field on the instance, so readiness is "the API can
+  # retrieve it" rather than a named state.
+  waited=0
+  until atlas api streams getStreamInstance --groupId "$PROJECT_ID" --tenantName "$spi" >/dev/null 2>&1; do
+    [[ $waited -ge 300 ]] && die "stream instance ${spi} did not become retrievable"
+    sleep 10
+    waited=$((waited + 10))
+    echo "  waiting for ${spi} (${waited}s)"
+  done
+fi
+
+for conn in "${STREAM_CONNECTIONS[@]}"; do
+  if atlas streams connections describe "$conn" --instance "$spi" -o json >/dev/null 2>&1; then
+    echo "  connection ${conn} (exists)"
+  else
+    conn_spec="$(mktemp /tmp/conn.XXXXXX.json)"
+    cat > "$conn_spec" <<JSON
+{
+  "name": "${conn}",
+  "type": "Cluster",
+  "clusterName": "${cluster}",
+  "dbRoleToExecute": { "role": "atlasAdmin", "type": "BUILT_IN" }
+}
+JSON
+    if ! err="$(atlas streams connections create "$conn" --instance "$spi" --file "$conn_spec" 2>&1 >/dev/null)"; then
+      rm -f "$conn_spec"
+      echo "$err" >&2
+      die "could not create stream connection ${conn}"
+    fi
+    rm -f "$conn_spec"
+    echo "  connection ${conn} (created)"
+  fi
+done
+echo
+
 # --- record -----------------------------------------------------------------
 srv="$(atlas clusters connectionStrings describe "$cluster" -o json 2>/dev/null \
   | python3 -c 'import json,sys; print(json.load(sys.stdin).get("standardSrv",""))')"
@@ -191,6 +267,8 @@ ATLAS_INSTANCE_SLUG=${slug}
 ATLAS_CLUSTER_NAME=${cluster}
 ATLAS_DB_USER=${db_user}
 ATLAS_DB_PASSWORD=${db_password}
+ATLAS_SPI_NAME=${spi}
+ATLAS_STREAM_CONNECTIONS=${STREAM_CONNECTIONS[*]}
 DB_NAME=${DB_NAME}
 MONGODB_URI=${uri}
 EOF
@@ -201,5 +279,7 @@ done
   cluster   ${cluster}  (${TIER}, ${PROVIDER} ${REGION})
   search    ${SEARCH_NODE_COUNT} x ${SEARCH_NODE_SIZE}
   db user   ${db_user}
+  stream    ${spi}  (${SPI_TIER}, ${SPI_PROVIDER} ${SPI_REGION})
+  conns     ${STREAM_CONNECTIONS[*]}
   record    ${HOST_OUTPUT_DIR}/atlas.env
 EOF

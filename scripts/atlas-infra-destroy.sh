@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# atlas infra destroy -- remove the cluster, its search nodes, and the
-# database user.
+# atlas infra destroy -- remove the stream instance and its connections, the
+# cluster, its search nodes, and the database user.
 #
 # Only touches resources this tool created. An Atlas project is a shared
 # container, so the cluster's `managed-by` tag is checked before deletion --
@@ -65,6 +65,8 @@ fi
 
 slug="${cluster##*-}"
 db_user="incident-${slug}"
+spi="$(read_env_value "$ATLAS_ENV_FILE" ATLAS_SPI_NAME 2>/dev/null || true)"
+[[ -n "$spi" ]] || spi="incident-${slug}-spi"
 
 # Enumerate before deleting. This took 25 minutes to provision, so the
 # listing should be specific enough to recognise -- and to notice when it
@@ -88,6 +90,11 @@ if atlas dbusers describe "$db_user" -o json >/dev/null 2>&1; then
 else
   echo "  database user  ${db_user} (absent)"
 fi
+if atlas api streams getStreamInstance --groupId "$PROJECT_ID" --tenantName "$spi" >/dev/null 2>&1; then
+  echo "  stream         ${spi} and its connections"
+else
+  echo "  stream         ${spi} (absent)"
+fi
 echo "  artifacts      ${HOST_OUTPUT_DIR}/atlas.env"
 echo
 
@@ -101,6 +108,17 @@ names = [c.get("name") for c in d.get("results", d if isinstance(d, list) else [
 print(", ".join(names))
 ' || true)"
 [[ -n "$untagged" ]] && echo "  other clusters ${untagged}"
+
+# Stream instances have no tags, so ownership is the incident-<slug>-spi
+# name. Anything else in the project is listed here to make it visible that
+# it is out of scope.
+others="$(atlas streams instances list -o json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+rows = d.get("results", d if isinstance(d, list) else [])
+print(", ".join(i.get("name", "") for i in rows if i.get("name") != sys.argv[1]))
+' "$spi" || true)"
+[[ -n "$others" ]] && echo "  other streams  ${others}"
 echo
 
 if [[ $dry_run -eq 1 ]]; then
@@ -115,7 +133,26 @@ if [[ $assume_yes -eq 0 ]]; then
   echo
 fi
 
-# Search nodes first: deleting the cluster with them attached is slower and
+# Stream processing first: the connections reference the cluster, so removing
+# them before it avoids leaving connections pointing at something gone.
+echo "stream processing"
+if atlas api streams getStreamInstance --groupId "$PROJECT_ID" --tenantName "$spi" >/dev/null 2>&1; then
+  conns="$(read_env_value "$ATLAS_ENV_FILE" ATLAS_STREAM_CONNECTIONS 2>/dev/null || echo "incident-events fix-events")"
+  for conn in $conns; do
+    if atlas streams connections describe "$conn" --instance "$spi" -o json >/dev/null 2>&1; then
+      run_quiet atlas streams connections delete "$conn" --instance "$spi" --force || true
+      echo "  connection ${conn} (deleted)"
+    fi
+  done
+  run_quiet atlas streams instances delete "$spi" --force \
+    || die "could not delete stream instance ${spi}"
+  echo "  ${spi} (deleted)"
+else
+  echo "  ${spi} (absent)"
+fi
+echo
+
+# Search nodes next: deleting the cluster with them attached is slower and
 # occasionally leaves them reported as deploying.
 echo "search nodes"
 if atlas clusters search nodes list --clusterName "$cluster" -o json >/dev/null 2>&1; then
