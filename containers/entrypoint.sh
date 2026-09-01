@@ -83,7 +83,7 @@ Nouns and verbs:
 
   atlas status          Report Atlas project state. Changes nothing.
   atlas infra apply     Create the cluster, search nodes, db user, access list.
-  atlas infra destroy   Delete them. Takes --yes.
+  atlas infra destroy   Delete them. Takes --yes and --dry-run.
 
   help            Show this message.
 

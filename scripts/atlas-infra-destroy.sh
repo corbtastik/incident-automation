@@ -17,8 +17,12 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 PROJECT_ID="${MONGODB_ATLAS_PROJECT_ID:?project not set}"
 
 assume_yes=0
+dry_run=0
 for arg in "$@"; do
-  case "$arg" in -y|--yes) assume_yes=1 ;; esac
+  case "$arg" in
+    -y|--yes)  assume_yes=1 ;;
+    --dry-run) dry_run=1 ;;
+  esac
 done
 
 echo "project: ${PROJECT_ID}"
@@ -62,13 +66,50 @@ fi
 slug="${cluster##*-}"
 db_user="incident-${slug}"
 
-echo "about to delete"
-echo "  cluster ${cluster} and its search nodes"
-echo "  database user ${db_user}"
+# Enumerate before deleting. This took 25 minutes to provision, so the
+# listing should be specific enough to recognise -- and to notice when it
+# names something unexpected.
+echo "will delete"
+echo "  cluster        ${cluster}  (tagged managed-by=incident-automation)"
+
+nodes_desc=""
+if nodes="$(atlas clusters search nodes list --clusterName "$cluster" -o json 2>/dev/null)"; then
+  nodes_desc="$(python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+specs = d.get("specs", [])
+print(", ".join("%s x %s" % (s.get("nodeCount", "?"), s.get("instanceSize", "?")) for s in specs) or "")
+' "$nodes" 2>/dev/null || true)"
+fi
+echo "  search nodes   ${nodes_desc:-none}"
+
+if atlas dbusers describe "$db_user" -o json >/dev/null 2>&1; then
+  echo "  database user  ${db_user}"
+else
+  echo "  database user  ${db_user} (absent)"
+fi
+echo "  artifacts      ${HOST_OUTPUT_DIR}/atlas.env"
 echo
 
+echo "will keep"
+echo "  access list    0.0.0.0/0 -- project-wide, may predate this tool"
+untagged="$(atlas clusters list -o json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+names = [c.get("name") for c in d.get("results", d if isinstance(d, list) else [])
+         if {t.get("key"): t.get("value") for t in (c.get("tags") or [])}.get("managed-by") != "incident-automation"]
+print(", ".join(names))
+' || true)"
+[[ -n "$untagged" ]] && echo "  other clusters ${untagged}"
+echo
+
+if [[ $dry_run -eq 1 ]]; then
+  echo "dry run -- nothing was deleted"
+  exit 0
+fi
+
 if [[ $assume_yes -eq 0 ]]; then
-  [[ -t 0 ]] || die "refusing to delete without confirmation -- pass --yes, or run with -it"
+  [[ -t 0 ]] || die "refusing to delete without confirmation -- pass --yes, --dry-run to preview, or run with -it"
   read -r -p "delete? [y/N] " reply
   [[ "$reply" == "y" || "$reply" == "Y" ]] || { echo "aborted"; exit 0; }
   echo
@@ -108,4 +149,3 @@ else
 fi
 echo
 echo "done -- cluster deletion continues in the background"
-echo "the 0.0.0.0/0 access list entry was left in place"
