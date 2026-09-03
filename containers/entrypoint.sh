@@ -83,8 +83,8 @@ Nouns and verbs:
 
   atlas status          Report Atlas project state. Changes nothing.
   atlas infra apply     Create the cluster, search nodes, db user, access
-                        list, stream instance and connections. Takes --yes
-                        and --dry-run.
+                        list, stream instance and connections. Takes --yes,
+                        --dry-run and --interactive.
   atlas infra validate  Connect with the recorded URI and check the infra.
                         Changes nothing.
   atlas infra destroy   Delete them. Takes --yes and --dry-run.
@@ -115,9 +115,10 @@ Environment:
   ATLAS_REGION           Optional. Default: CENTRAL_US
   ATLAS_CLUSTER_TIER     Optional. Default: M10
   ATLAS_INSTANCE_SLUG    Optional. Set to pin or re-adopt an instance.
-  ATLAS_SPI_PROVIDER     Optional. Default: GCP
-  ATLAS_SPI_REGION       Optional. Default: US_CENTRAL1 (not the cluster's
-                         CENTRAL_US -- the two use different region naming)
+  ATLAS_SPI_PROVIDER     Optional. Defaults to the cluster's provider.
+  ATLAS_SPI_REGION       Optional. Derived from the cluster region -- the two
+                         services name the same place differently, e.g. a
+                         cluster in CENTRAL_US pairs with US_CENTRAL1.
   ATLAS_SPI_TIER         Optional. Default: SP30
   GCP_INSTANCE_SLUG      Optional. Set to pin or re-adopt an instance.
   HOST_OUTPUT_DIR        Optional. Host path of the /output mount, recorded in

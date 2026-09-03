@@ -43,6 +43,34 @@ The handoff between the two is `output/simulator.env` and
 `apply`, `setup` and `destroy` take `--yes` and `--dry-run`. Everything named
 `status` or `validate` changes nothing.
 
+### Choosing sizes and regions
+
+`atlas infra apply --interactive` prompts for the five choices that cost money
+or run out of capacity:
+
+```
+1. Cloud provider      GCP / AWS / AZURE
+2. Cluster tier        M10 / M20 / M30 / M40
+3. Region              fetched live for that provider and tier
+4. Search node tier    S20 / S30 / S40 HIGHCPU_NVME
+5. Stream tier         SP10 / SP30 / SP50
+```
+
+Tier is asked before region on purpose: Atlas filters available regions by
+tier, so this order means the region list reflects what can actually be
+provisioned — which is where capacity failures come from. Every prompt takes a
+typed value as well as a number, so a list that has gone stale never blocks
+you.
+
+Needs `-it`. Without it the command fails immediately rather than hanging.
+
+The **stream processing region is derived, not asked**. Cluster and stream
+regions name the same place differently — a cluster in `CENTRAL_US` pairs with
+a stream instance in `US_CENTRAL1` — so choosing one and forgetting the other
+would put the stream instance a continent away from the cluster it reads. An
+unmapped region warns and falls back rather than guessing; `ATLAS_SPI_REGION`
+overrides.
+
 ## Prerequisites
 
 1. A GCP account and a project you own. Setup does not create the project.
@@ -170,13 +198,14 @@ configured and fails obscurely; an absent one does not.
 | `ATLAS_PROVIDER` / `ATLAS_REGION` | no | `GCP` / `CENTRAL_US` |
 | `ATLAS_CLUSTER_TIER` | no | `M10` |
 | `ATLAS_SEARCH_NODE_SIZE` / `_COUNT` | no | `S20_HIGHCPU_NVME` / `2` |
-| `ATLAS_SPI_PROVIDER` / `ATLAS_SPI_REGION` / `ATLAS_SPI_TIER` | no | `GCP` / `US_CENTRAL1` / `SP30` |
+| `ATLAS_SPI_PROVIDER` / `ATLAS_SPI_TIER` | no | follows the cluster / `SP30` |
+| `ATLAS_SPI_REGION` | no | derived from the cluster region |
 | `GCP_INSTANCE_SLUG` / `ATLAS_INSTANCE_SLUG` | no | generated |
 | `HOST_OUTPUT_DIR` | no | `./output` |
 | `SKIP_API_ENABLE` | no | `false` |
 
-Note the Atlas region naming differs between the two services: a cluster in
-`CENTRAL_US` pairs with a stream instance in `US_CENTRAL1`.
+Every choice is recorded in `atlas.env`, so a re-run uses what was actually
+provisioned rather than falling back to defaults that may since have changed.
 
 ## Re-running
 

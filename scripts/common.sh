@@ -269,3 +269,122 @@ generate_password() {
   [[ ${#pw} -eq 28 ]] || return 1
   printf '%s' "$pw"
 }
+
+# --- interactive selection --------------------------------------------------
+
+# Numbered menu with a free-text escape. Every list here is either fetched
+# live or hardcoded, and the hardcoded ones will rot as Atlas adds sizes --
+# "other" means a stale list never blocks anyone. A wrong value is rejected at
+# create time with a clear error, which is a better failure than a menu that
+# silently omits the option you need.
+#
+# prompt_choice <outvar> <prompt> <default> <option>...
+prompt_choice() {
+  local __outvar="$1" prompt="$2" default="$3"; shift 3
+  local opts=("$@") i reply picked=""
+
+  echo
+  echo "$prompt"
+  for i in "${!opts[@]}"; do
+    if [[ "${opts[$i]}" == "$default" ]]; then
+      printf '  %2d) %s  (default)\n' "$((i + 1))" "${opts[$i]}"
+    else
+      printf '  %2d) %s\n' "$((i + 1))" "${opts[$i]}"
+    fi
+  done
+  printf '  %2d) other -- type a value\n' "$(( ${#opts[@]} + 1 ))"
+
+  read -r -p "  choice [${default}]: " reply
+
+  if [[ -z "$reply" ]]; then
+    picked="$default"
+  elif [[ "$reply" =~ ^[0-9]+$ ]] && (( reply >= 1 && reply <= ${#opts[@]} )); then
+    picked="${opts[$((reply - 1))]}"
+  elif [[ "$reply" =~ ^[0-9]+$ ]] && (( reply == ${#opts[@]} + 1 )); then
+    read -r -p "  value: " picked
+    [[ -n "$picked" ]] || picked="$default"
+  else
+    # Typed the value directly rather than its number.
+    picked="$reply"
+  fi
+
+  printf -v "$__outvar" '%s' "$picked"
+  echo "  -> ${picked}"
+}
+
+# Cluster regions and stream processing regions use different naming schemes
+# for the same physical place: a cluster in CENTRAL_US pairs with a stream
+# instance in US_CENTRAL1. Without this, choosing a cluster region leaves the
+# stream instance wherever the default put it -- possibly a continent away
+# from the cluster it reads.
+#
+# Only GCP CENTRAL_US -> US_CENTRAL1 is confirmed against a live instance. The
+# rest are best-effort; an unmapped region returns empty and the caller warns
+# rather than guessing.
+atlas_spi_region_for() {
+  local provider="$1" region="$2"
+  case "${provider}:${region}" in
+    GCP:CENTRAL_US)      echo US_CENTRAL1 ;;
+    GCP:EASTERN_US)      echo US_EAST4 ;;
+    GCP:WESTERN_US)      echo US_WEST1 ;;
+    GCP:WESTERN_EUROPE)  echo EUROPE_WEST1 ;;
+    AWS:US_EAST_1)       echo VIRGINIA_USA ;;
+    AWS:US_WEST_2)       echo OREGON_USA ;;
+    AWS:EU_WEST_1)       echo IRELAND_EIRE ;;
+    AZURE:US_EAST)       echo eastus ;;
+    AZURE:US_EAST_2)     echo eastus2 ;;
+    AZURE:EUROPE_WEST)   echo westeurope ;;
+    *)                   echo "" ;;
+  esac
+}
+
+# Live region list for a provider and tier.
+#
+# The response nests two levels deeper than it looks:
+#   results[].instanceSizes[].availableRegions[].name
+# Reading results[].instanceSizes[].name instead yields the tier back, which
+# is a menu of one wrong answer -- so this matches the shape exactly and falls
+# back to a static list when it does not, rather than offering whatever it
+# happened to find.
+#
+# Atlas marks one region per tier as default; it is emitted first so the
+# prompt default is Atlas's own recommendation.
+atlas_regions_for() {
+  local provider="$1" tier="$2" json regions
+
+  json="$(atlas clusters availableRegions list --provider "$provider" --tier "$tier" -o json 2>/dev/null || true)"
+  regions="$(python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit
+
+rows = d.get("results", d if isinstance(d, list) else [])
+wanted = sys.argv[2]
+preferred, others = [], []
+
+for row in rows:
+    for size in row.get("instanceSizes") or []:
+        if size.get("name") != wanted:
+            continue
+        for region in size.get("availableRegions") or []:
+            name = region.get("name")
+            if not name:
+                continue
+            (preferred if region.get("default") else others).append(name)
+
+print("\n".join(dict.fromkeys(preferred + others)))
+' "$json" "$tier" 2>/dev/null || true)"
+
+  if [[ -n "$regions" ]]; then
+    printf '%s\n' "$regions"
+    return 0
+  fi
+
+  case "$provider" in
+    GCP)   printf '%s\n' CENTRAL_US EASTERN_US WESTERN_US WESTERN_EUROPE ;;
+    AWS)   printf '%s\n' US_EAST_1 US_WEST_2 EU_WEST_1 AP_SOUTHEAST_1 ;;
+    AZURE) printf '%s\n' US_EAST US_EAST_2 EUROPE_WEST ;;
+  esac
+}

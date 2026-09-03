@@ -20,7 +20,7 @@ TIER="${ATLAS_CLUSTER_TIER:-M10}"
 MEMBERS="${ATLAS_CLUSTER_MEMBERS:-3}"
 DB_NAME="${DB_NAME:-incidents}"
 
-SPI_PROVIDER="${ATLAS_SPI_PROVIDER:-GCP}"
+SPI_PROVIDER="${ATLAS_SPI_PROVIDER:-$PROVIDER}"
 SPI_REGION="${ATLAS_SPI_REGION:-US_CENTRAL1}"
 SPI_TIER="${ATLAS_SPI_TIER:-SP30}"
 
@@ -36,15 +36,72 @@ SEARCH_TIMEOUT="${ATLAS_SEARCH_TIMEOUT:-1800}"
 
 assume_yes=0
 dry_run=0
+interactive=0
 for arg in "$@"; do
   case "$arg" in
-    -y|--yes)  assume_yes=1 ;;
-    --dry-run) dry_run=1 ;;
+    -y|--yes)      assume_yes=1 ;;
+    --dry-run)     dry_run=1 ;;
+    --interactive) interactive=1 ;;
   esac
 done
 
+# Whether the operator set these themselves. If they did, neither the
+# interactive prompts nor the region mapping may override them.
+spi_region_explicit=0
+spi_provider_explicit=0
+[[ -n "${ATLAS_SPI_REGION:-}" ]]   && spi_region_explicit=1
+[[ -n "${ATLAS_SPI_PROVIDER:-}" ]] && spi_provider_explicit=1
+
 echo "project: ${PROJECT_ID}"
 echo
+
+# --- interactive selection --------------------------------------------------
+# Tier is asked before region on purpose: availableRegions filters by both, so
+# asking in this order means the region list reflects what is actually
+# available at that tier -- which is where capacity failures come from.
+if [[ $interactive -eq 1 ]]; then
+  [[ -t 0 ]] || die "--interactive needs a terminal -- add -it to podman run"
+
+  prompt_choice PROVIDER "cloud provider" "$PROVIDER" GCP AWS AZURE
+  prompt_choice TIER "cluster tier" "$TIER" M10 M20 M30 M40
+
+  mapfile -t region_opts < <(atlas_regions_for "$PROVIDER" "$TIER")
+  if [[ ${#region_opts[@]} -eq 0 ]]; then
+    die "no regions returned for ${PROVIDER} at ${TIER}"
+  fi
+  # Prefer the configured region when Atlas offers it, so the default stays
+  # the one that is mapped and tested rather than whichever Atlas happens to
+  # list first.
+  region_default="${region_opts[0]}"
+  for candidate in "${region_opts[@]}"; do
+    [[ "$candidate" == "$REGION" ]] && { region_default="$REGION"; break; }
+  done
+  prompt_choice REGION "region for ${PROVIDER} ${TIER}" "$region_default" "${region_opts[@]}"
+
+  prompt_choice SEARCH_NODE_SIZE "search node tier" "$SEARCH_NODE_SIZE" \
+    S20_HIGHCPU_NVME S30_HIGHCPU_NVME S40_HIGHCPU_NVME
+  prompt_choice SPI_TIER "stream processing tier" "$SPI_TIER" SP10 SP30 SP50
+  echo
+fi
+
+# The stream instance follows the cluster's provider unless told otherwise.
+# Recomputed here because the interactive prompts may have changed PROVIDER
+# after the defaults were resolved.
+[[ $spi_provider_explicit -eq 0 ]] && SPI_PROVIDER="$PROVIDER"
+
+# Stream regions use different names from cluster regions for the same place.
+# Derive rather than prompt: it is a naming inconsistency, not a decision the
+# operator should have to make.
+if [[ $spi_region_explicit -eq 0 ]]; then
+  mapped="$(atlas_spi_region_for "$SPI_PROVIDER" "$REGION")"
+  if [[ -n "$mapped" ]]; then
+    SPI_REGION="$mapped"
+  else
+    echo "warning: no stream region mapped for ${SPI_PROVIDER} ${REGION};" >&2
+    echo "         using ${SPI_REGION}. Set ATLAS_SPI_REGION to override." >&2
+    echo >&2
+  fi
+fi
 
 # --- resolve the instance ---------------------------------------------------
 cluster=""
@@ -92,6 +149,8 @@ echo "instance"
 echo "  slug:    ${slug} (${origin})"
 echo "  cluster: ${cluster}"
 echo "  target:  ${TIER} on ${PROVIDER} ${REGION}, ${MEMBERS} members"
+echo "  search:  ${SEARCH_NODE_COUNT} x ${SEARCH_NODE_SIZE}"
+echo "  stream:  ${SPI_TIER} on ${SPI_PROVIDER} ${SPI_REGION}"
 echo
 
 # --- plan -------------------------------------------------------------------
@@ -353,6 +412,12 @@ cat > "$ATLAS_ENV_FILE" <<EOF
 ATLAS_PROJECT_ID=${PROJECT_ID}
 ATLAS_INSTANCE_SLUG=${slug}
 ATLAS_CLUSTER_NAME=${cluster}
+ATLAS_PROVIDER=${PROVIDER}
+ATLAS_REGION=${REGION}
+ATLAS_CLUSTER_TIER=${TIER}
+ATLAS_SEARCH_NODE_SIZE=${SEARCH_NODE_SIZE}
+ATLAS_SPI_TIER=${SPI_TIER}
+ATLAS_SPI_REGION=${SPI_REGION}
 ATLAS_DB_USER=${db_user}
 ATLAS_DB_PASSWORD=${db_password}
 ATLAS_SPI_NAME=${spi}
