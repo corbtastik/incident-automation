@@ -90,8 +90,10 @@ else
 fi
 echo
 
+# The app env files describe both halves, so they are stale once either one
+# is gone.
 echo "artifacts"
-for f in gcp-runtime-key.json gcp.env; do
+for f in gcp-runtime-key.json gcp.env simulator.env visualizer.env incident-app-storage-key.json; do
   if [[ -f "${OUTPUT_DIR}/${f}" ]]; then
     rm -f "${OUTPUT_DIR}/${f}"
     echo "  ${f} (removed)"

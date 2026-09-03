@@ -333,6 +333,12 @@ JSON
 done
 echo
 
+# The stream instance exposes a hostname the simulator connects to with
+# mongosh to create its processors. Recorded here so the app never needs Atlas
+# API credentials of its own.
+spi_host="$(atlas streams instances describe "$spi" -o json 2>/dev/null \
+  | python3 -c 'import json,sys; h=json.load(sys.stdin).get("hostnames") or [""]; print(h[0])' 2>/dev/null || true)"
+
 # --- record -----------------------------------------------------------------
 srv="$(atlas clusters connectionStrings describe "$cluster" -o json 2>/dev/null \
   | python3 -c 'import json,sys; print(json.load(sys.stdin).get("standardSrv",""))')"
@@ -350,6 +356,8 @@ ATLAS_CLUSTER_NAME=${cluster}
 ATLAS_DB_USER=${db_user}
 ATLAS_DB_PASSWORD=${db_password}
 ATLAS_SPI_NAME=${spi}
+ATLAS_SPI_HOST=${spi_host}
+ATLAS_SPI_URI=mongodb://${db_user}:${db_password}@${spi_host}/?authSource=admin&tls=true
 ATLAS_STREAM_CONNECTIONS=${STREAM_CONNECTIONS[*]}
 DB_NAME=${DB_NAME}
 MONGODB_URI=${uri}
@@ -362,6 +370,7 @@ done
   search    ${SEARCH_NODE_COUNT} x ${SEARCH_NODE_SIZE}
   db user   ${db_user}
   stream    ${spi}  (${SPI_TIER}, ${SPI_PROVIDER} ${SPI_REGION})
+  spi host  ${spi_host:-<unavailable>}
   conns     ${STREAM_CONNECTIONS[*]}
   record    ${HOST_OUTPUT_DIR}/atlas.env
 EOF

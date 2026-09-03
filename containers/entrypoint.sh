@@ -89,6 +89,13 @@ Nouns and verbs:
                         Changes nothing.
   atlas infra destroy   Delete them. Takes --yes and --dry-run.
 
+  all setup             gcp setup + atlas infra apply + env write.
+  all status            Report both sides.
+  all destroy           Tear down both sides. Takes --yes and --dry-run.
+
+  env write             Write simulator.env, visualizer.env and the app key
+                        from whatever has been provisioned.
+
   help            Show this message.
 
 Environment:
@@ -338,6 +345,82 @@ EOF
         *)
           usage
           die "atlas: unknown verb '$verb'"
+          ;;
+      esac
+      ;;
+    env)
+      local verb="${2:-write}"
+      shift 2 2>/dev/null || shift $#
+      case "$verb" in
+        write)
+          require_output_dir
+          "$SCRIPTS_DIR/emit-env.sh" "$@"
+          ;;
+        *)
+          usage
+          die "env: unknown verb '$verb'"
+          ;;
+      esac
+      ;;
+    all)
+      local verb="${2:-}"
+      [[ -n "$verb" ]] || { usage; die "all: a verb is required"; }
+      shift 2
+      case "$verb" in
+        setup)
+          # Preflight everything before creating anything. Otherwise the
+          # operator signs in, provisions GCP, waits twenty minutes for a
+          # cluster, and only then fails on a missing Atlas key.
+          require_project
+          require_output_dir
+          validate_bucket_base_name "${GCS_BUCKET_BASE_NAME:-}"
+          [[ -n "${ATLAS_PUBLIC_KEY:-}" && -n "${ATLAS_PRIVATE_KEY:-}" ]] \
+            || die "ATLAS_PUBLIC_KEY and ATLAS_PRIVATE_KEY are required for \`all setup\`"
+          [[ -n "${ATLAS_PROJECT_ID:-}" ]] \
+            || die "ATLAS_PROJECT_ID is required for \`all setup\`"
+
+          # GCP first: it finishes in about a minute, so a credential problem
+          # surfaces before the Atlas cluster starts provisioning.
+          echo "═══ gcp ═══"
+          authenticate_human
+          echo
+          SETUP_CHAIN=1 "$SCRIPTS_DIR/gcp-bootstrap.sh"
+          echo
+          SETUP_CHAIN=1 "$SCRIPTS_DIR/gcp-apply.sh"
+          echo
+          echo "═══ atlas ═══"
+          authenticate_atlas
+          "$SCRIPTS_DIR/atlas-infra-apply.sh" "$@"
+          echo
+          echo "═══ app configuration ═══"
+          "$SCRIPTS_DIR/emit-env.sh"
+          ;;
+        status)
+          echo "═══ gcp ═══"
+          require_project
+          authenticate_service_account
+          "$SCRIPTS_DIR/gcp-status.sh" || true
+          echo
+          echo "═══ atlas ═══"
+          authenticate_atlas
+          "$SCRIPTS_DIR/atlas-status.sh"
+          ;;
+        destroy)
+          require_output_dir
+          # Atlas first -- it is the expensive half, so if the operator
+          # interrupts partway the billing is already stopped.
+          echo "═══ atlas ═══"
+          authenticate_atlas
+          "$SCRIPTS_DIR/atlas-infra-destroy.sh" "$@" || true
+          echo
+          echo "═══ gcp ═══"
+          require_project
+          authenticate_service_account
+          "$SCRIPTS_DIR/gcp-destroy.sh" "$@"
+          ;;
+        *)
+          usage
+          die "all: unknown verb '$verb'"
           ;;
       esac
       ;;

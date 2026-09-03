@@ -177,6 +177,8 @@ else
 fi
 echo
 
+# The app env files describe both halves, so they are stale once either one
+# is gone.
 echo "artifacts"
 if [[ -f "$ATLAS_ENV_FILE" ]]; then
   rm -f "$ATLAS_ENV_FILE"
@@ -184,5 +186,12 @@ if [[ -f "$ATLAS_ENV_FILE" ]]; then
 else
   echo "  atlas.env (absent)"
 fi
+for f in simulator.env visualizer.env incident-app-storage-key.json; do
+  if [[ -f "${OUTPUT_DIR}/${f}" ]]; then
+    rm -f "${OUTPUT_DIR}/${f}"
+    echo "  ${f} (removed)"
+  fi
+done
+
 echo
 echo "done -- cluster deletion continues in the background"
